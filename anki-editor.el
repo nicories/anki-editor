@@ -78,6 +78,14 @@
   "Scope, where duplicate cards are checked."
   :type 'string)
 
+(defcustom anki-editor-quick-field-mapping
+  '(("Basic" . ("Front" . "Back")))
+  "Associate note title and contents with fields.
+E.g. (\"Basic\" . (\"Front\" . \"Back\")) uses note title for
+note field \"Front\" and the contents with note field \"Back\"
+for the note type \"Basic\"."
+  :type '(list))
+
 (defcustom anki-editor-break-consecutive-braces-in-latex
   nil
   "If non-nil, consecutive `}' will be automatically separated by spaces to prevent early-closing of cloze.
@@ -282,7 +290,7 @@ The result is the path to the newly stored media file."
                   (latex-environment . anki-editor--ox-latex))))
 
 (defconst anki-editor--ox-export-ext-plist
-  '(:with-toc nil :with-properties nil :with-planning nil :anki-editor-mode t))
+  '(:with-toc nil :anki-editor-mode t :with-drawers nil :with-planning nil))
 
 (cl-macrolet ((with-table (table)
                           `(cl-loop for delims in ,table
@@ -418,6 +426,9 @@ The implementation is borrowed and simplified from ox-html."
 
 ;;; Core primitives
 
+(defconst anki-editor-exporter-default "default")
+(defconst anki-editor-exporter-raw "raw")
+(defconst anki-editor-prop-exporter "ANKI_EXPORTER")
 (defconst anki-editor-prop-note-type "ANKI_NOTE_TYPE")
 (defconst anki-editor-prop-note-id "ANKI_NOTE_ID")
 (defconst anki-editor-prop-format "ANKI_FORMAT")
@@ -655,51 +666,115 @@ Where the subtree is created depends on PREFIX."
 (defun anki-editor--entry-get-multivalued-property-with-inheritance (pom property)
   "Return a list of values in a multivalued property with inheritance."
   (let* ((value (org-entry-get pom property t))
-	     (values (and value (split-string value))))
+         (values (and value (split-string value))))
     (mapcar #'org-entry-restore-space values)))
 
+(defun anki-editor-get-quick-fields ()
+  ""
+  (interactive)
+  (let* (quick-fields
+         (note-heading (org-element-at-point))
+         (note-title (org-element-property :title note-heading))
+         (note-type (org-element-property :ANKI_NOTE_TYPE note-heading))
+         (quick-field-mapping (alist-get note-type anki-editor-quick-field-mapping nil nil 'equal))
+         (title-field (car quick-field-mapping))
+         (contents-field (cdr quick-field-mapping))
+         (contents-begin (org-element-property :contents-begin note-heading))
+         (contents-end (org-element-property :contents-end note-heading))
+         (point-of-first-child (- (save-excursion
+                                    (if (org-goto-first-child)
+                                        (point)
+                                      (point-max)))
+                                  1)))
+    (when title-field
+      (map-put quick-fields
+               title-field
+               (org-export-string-as note-title
+                                     anki-editor--ox-anki-html-backend
+                                     t
+                                     anki-editor--ox-export-ext-plist)
+               'equal))
+    (when contents-field
+      (map-put quick-fields
+               contents-field
+               (cond
+                ((and contents-begin contents-end)
+                 (org-export-string-as
+                  (buffer-substring
+                   contents-begin
+                   ;; in case the buffer is narrowed,
+                   ;; e.g. by `org-map-entries' when
+                   ;; scope is `tree'
+                   (min (point-max) contents-end point-of-first-child))
+                  anki-editor--ox-anki-html-backend
+                  t
+                  anki-editor--ox-export-ext-plist))
+                (t ""))
+               'equal))
+    quick-fields))
+
 (defun anki-editor--build-fields ()
-  "Build a list of fields from subheadings of current heading.
-
-Return a list of cons of (FIELD-NAME . FIELD-CONTENT)."
+  "Build a list of fields from subheadings of current heading,
+each element of which is a cons cell, the car of which is field
+name and the cdr of which is field content."
   (save-excursion
-    (cl-loop with inhibit-message = t ; suppress echo message from `org-babel-exp-src-block'
-             initially (unless (org-goto-first-child)
-                         (cl-return))
-             for last-pt = (point)
-             for element = (org-element-at-point)
-             for heading = (substring-no-properties
-                            (org-element-property :raw-value element))
-             for format = (anki-editor-entry-format)
-             ;; contents-begin includes drawers and scheduling data,
-             ;; which we'd like to ignore, here we skip these
-             ;; elements and reset contents-begin.
-             for begin = (cl-loop for eoh = (org-element-property :contents-begin element)
-                                  then (org-element-property :end subelem)
-                                  for subelem = (progn
-                                                  (goto-char eoh)
-                                                  (org-element-context))
-                                  while (memq (org-element-type subelem)
-                                              '(drawer planning property-drawer))
-                                  finally return (org-element-property :begin subelem))
-             for end = (org-element-property :contents-end element)
-             for raw = (or (and begin
-                                end
-                                (buffer-substring-no-properties
-                                 begin
-                                 ;; in case the buffer is narrowed,
-                                 ;; e.g. by `org-map-entries' when
-                                 ;; scope is `tree'
-                                 (min (point-max) end)))
-                           "")
-             for content = (anki-editor--export-string raw format)
-             collect (cons heading content)
-             ;; proceed to next field entry and check last-pt to
-             ;; see if it's already the last entry
-             do (org-forward-heading-same-level nil t)
-             until (= last-pt (point)))))
-
-
+    (let ((fields (anki-editor-get-quick-fields))
+          (point-of-last-child (point)))
+      (when (org-goto-first-child)
+        (while (/= point-of-last-child (point))
+          (setq point-of-last-child (point))
+          (let* ((inhibit-message t)  ;; suppress echo message from `org-babel-exp-src-block'
+                 (field-heading (org-element-at-point))
+                 (field-name (substring-no-properties
+                              (org-element-property
+                               :raw-value
+                               field-heading)))
+                 (contents-begin (org-element-property :contents-begin field-heading))
+                 (contents-end (org-element-property :contents-end field-heading))
+                 (exporter (or (org-entry-get-with-inheritance anki-editor-prop-exporter)
+                               anki-editor-exporter-default))
+                 (end-of-header (org-element-property :contents-begin field-heading))
+                 raw-content
+                 content-elem)
+            (when (string= exporter anki-editor-exporter-raw)
+              ;; contents-begin includes drawers and scheduling data,
+              ;; which we'd like to ignore, here we skip these
+              ;; elements and reset contents-begin.
+              (while (progn
+                       (goto-char end-of-header)
+                       (setq content-elem (org-element-context))
+                       (memq (car content-elem) '(drawer planning property-drawer)))
+                (setq end-of-header (org-element-property :end content-elem)))
+              (setq contents-begin (org-element-property :begin content-elem)))
+            (setq raw-content (or (and contents-begin
+                                       contents-end
+                                       (buffer-substring
+                                        contents-begin
+                                        ;; in case the buffer is narrowed,
+                                        ;; e.g. by `org-map-entries' when
+                                        ;; scope is `tree'
+                                        (min (point-max) contents-end)))
+                                  ""))
+            (map-put fields
+                     field-name
+                     (pcase exporter
+                       ((pred (string= anki-editor-exporter-raw))
+                        raw-content)
+                       ((pred (string= anki-editor-exporter-default))
+                        (or (org-export-string-as
+                             raw-content
+                             anki-editor--ox-anki-html-backend
+                             t
+                             anki-editor--ox-export-ext-plist)
+                            ;; 8.2.10 version of
+                            ;; `org-export-filter-apply-functions'
+                            ;; returns nil for an input of empty string,
+                            ;; which will cause AnkiConnect to fail
+                            ""))
+                       (_ (error "Invalid exporter: %s" exporter)))
+                     'equal)
+            (org-forward-heading-same-level nil t))))
+      (reverse fields))))
 ;;; Minor mode
 
 (defvar-local anki-editor--anki-tags-cache nil)
