@@ -68,6 +68,16 @@
   "Customizations for anki-editor."
   :group 'org)
 
+(defcustom anki-editor-duplicates-allow
+  nil
+  "If t, allow duplicate cards."
+  :type 'boolean)
+
+(defcustom anki-editor-duplicates-scope
+  "deck"
+  "Scope, where duplicate cards are checked."
+  :type 'string)
+
 (defcustom anki-editor-break-consecutive-braces-in-latex
   nil
   "If non-nil, consecutive `}' will be automatically separated by spaces to prevent early-closing of cloze.
@@ -235,6 +245,7 @@ request directly, it simply queues the request."
    :id (string-to-number (or (anki-editor-note-id note) "0"))
    :deckName (anki-editor-note-deck note)
    :modelName (anki-editor-note-model note)
+   :options (list :allowDuplicates anki-editor-duplicates-allow :duplicateScope anki-editor-duplicates-scope)
    :fields (anki-editor-note-fields note)
    ;; Convert tags to a vector since empty list is identical to nil
    ;; which will become None in Python, but AnkiConnect requires it
